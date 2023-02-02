@@ -10,6 +10,9 @@ It will:
 - Use ElevenLabs to generate an audio file from the script(While testing, I will use built in text to speech, so I don't burn through my credits)
     -(Maybe this in a separate script)
 
+TODO:
+- Add a way to save the script and audio file
+- incorporate ElevenLabs for text to voice
 
 
 """
