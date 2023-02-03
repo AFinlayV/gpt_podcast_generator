@@ -93,7 +93,7 @@ def timestamp_to_datetime(unix_time):
 
 # Initialize everything
 def init_llm():
-    llm = OpenAI(temperature=0.5, max_tokens=1024, top_p=1, frequency_penalty=0, presence_penalty=0.6)
+    llm = OpenAI(temperature=0.9, max_tokens=1024, top_p=1, frequency_penalty=0, presence_penalty=0.6)
     return llm
 
 
@@ -138,14 +138,17 @@ def init():
 def get_topics(news_api, llm):
     # get a list of the top 10 headlines from the news api
     headlines = []
-    top_headlines = news_api.get_top_headlines(language='en', country='us', page_size=10)
+    top_headlines = news_api.get_top_headlines(language='en',
+
+                                               country='us',
+                                               page_size=20)
     # use llm to get a list of 5 topics from the headline list
     template = """"
     The top headlines are:
     
     {headlines}
     
-    Generate a list of 5 topics that are related to these headlines. 
+    Generate a list of 5 specific topics that are related to these headlines. 
     The list should be separated by new lines, and not numbered.
     
     Topics:
@@ -164,12 +167,16 @@ def get_news(news_api, topic_list):
     news = {}
     for topic in topic_list:
         vprint(f"Getting news on {topic}")
-        response = news_api.get_everything(q=topic,
-                                           from_param=datetime.datetime.now() - datetime.timedelta(days=1),
-                                           to=datetime.datetime.now(),
-                                           language='en',
-                                           sort_by='relevancy',
-                                           page_size=1)
+        try:
+            response = news_api.get_everything(q=topic,
+                                               from_param=datetime.datetime.now() - datetime.timedelta(days=1),
+                                               to=datetime.datetime.now(),
+                                               language='en',
+                                               sort_by='relevancy',
+                                               page_size=1)
+        except Exception as e:
+            print(e)
+            continue
         news[topic] = {"url": response["articles"][0]["url"],
                        "title": response["articles"][0]["title"],
                        "content": response["articles"][0]["content"],
@@ -204,7 +211,9 @@ def summarize_article_text(article_text, llm):
     article_text_chunks.append(" ".join(article_text))
     summary = ""
     for chunk in article_text_chunks:
-        template = """Summarize this text. be sure to include all of the relevant information
+        template = """
+        Summarize this text. be sure to include all of the relevant information, 
+        and exclude any unnecessary information.
     
         {text}
     
@@ -219,11 +228,16 @@ def summarize_article_text(article_text, llm):
 def get_podcast_intro(text, llm):
     template = """
     Generate an introduction script for a podcast given the following script. 
+    The podcast is called "The Automated Podcast" and is about the news of the day.
+    The Podcast is generated entirely by AI and it is important to be clear about this in the introduction.
     Make the text interesting and engaging in a conversational tone:
-
+    
+    Script:
+    
     {text}
 
-    Introduction:"""
+    Introduction:
+    """
     prompt = PromptTemplate(input_variables=["text"],
                             template=template)
     try:
@@ -267,12 +281,16 @@ def generate_interview_questions(podcast_news, llm):
     
     {podcast_news}
     
-    Interview questions:
+    Write the interview questions in a list separated by new lines, not as a bullet point list or numbered list.
+    
+    Interview Questions:
     """
     prompt = PromptTemplate(input_variables=["podcast_news"],
                             template=template)
     questions = llm(prompt=prompt.format(podcast_news=podcast_news))
     questions = questions.split("\n")
+    # remove empty strings
+    questions = [question for question in questions if question]
     vprint(f"Interview questions: \n {questions}")
     return questions
 
@@ -353,15 +371,23 @@ def transform_func(inputs: dict) -> dict:
 
 def main():
     llm, engine, google_search, news_api, tools = init()
-    topic_list = get_topics(news_api=news_api, llm=llm)
-    news = get_news(news_api=news_api, topic_list=topic_list)
-    articles_dict = {}
-    for item in news:
-        article_text = get_full_article_text(news[item]["url"], news[item]["content"])
-        articles_dict[news[item]["title"]] = article_text
-    podcast_news = get_podcast_news(articles_dict, llm)
+    date_today = datetime.datetime.now().strftime("%Y-%m-%d")
+    if not os.path.exists(f"{date_today}podcast_news.json"):
+        topic_list = get_topics(news_api=news_api, llm=llm)
+        news = get_news(news_api=news_api, topic_list=topic_list)
+        articles_dict = {}
+        for item in news:
+            article_text = get_full_article_text(news[item]["url"], news[item]["content"])
+            articles_dict[news[item]["title"]] = article_text
+        podcast_news = get_podcast_news(articles_dict, llm)
+        save_json("podcast_news.json", podcast_news)
+    else:
+        podcast_news = load_json(f"{date_today}podcast_news.json")
     interview_questions = generate_interview_questions(podcast_news, llm)
     interview = get_podcast_interview(interview_questions, llm)
+    for question in interview:
+        print(question)
+        print(interview[question])
     full_text = podcast_news
     for question in interview:
         full_text += f"\n\n{question}\n\n{interview[question]}"
