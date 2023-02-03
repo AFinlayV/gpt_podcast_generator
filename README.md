@@ -10,7 +10,4 @@ The basic idea will be to
 I will be using the following tools:
 -voice model: Eleven
 -LLM: GPT-3
--search: serpapi
-
-
-
+-search: news_api
