@@ -7,12 +7,15 @@ It will:
 - download the text of those articles and clean them up
 - Use Gpt-3 to summarize the articles
 - Use Gpt-3 to generate a script for the podcast
-- Use ElevenLabs to generate an audio file from the script(While testing, I will use built in text to speech, so I don't burn through my credits)
-    -(Maybe this in a separate script)
-
-TODO:
+- Use ElevenLabs to generate an audio file from the script(While testing, I will use built in text to speech, so I don't
+    burn through my credits)
 - Add a way to save the script and audio file
 - incorporate ElevenLabs for text to voice
+- Give the podcast a structure
+    - Intro
+    - News
+    - Interview
+    - Outro/Summary
 
 
 """
@@ -34,7 +37,6 @@ from langchain import text_splitter
 from newsapi import NewsApiClient
 
 # set global variables
-TOPIC_LIST = ['ChatGPT', 'AI Art', 'Python Programming']
 VERBOSE = True
 
 # set API keys
@@ -115,12 +117,12 @@ def init_tools(llm):
     return tools
 
 
-def init_elevenlabs():
+def init_eleven_labs():
     pass
 
 
 def init_agent(tools, llm):
-    agent = initialize_agent(tools, llm, agent="zero-shot-react-description", verbose=VERBOSE)
+    agent = initialize_agent(tools, llm, agent="conversational-react-description", verbose=VERBOSE)
     return agent
 
 
@@ -129,46 +131,218 @@ def init():
     engine = init_python_tts()
     google_search = init_google_search()
     tools = init_tools(llm)
-    agent = init_agent(tools=tools, llm=llm)
     news_api = init_news_api()
-    return llm, engine, google_search, agent, news_api, tools
+    return llm, engine, google_search, news_api, tools
 
 
-def get_news(news_api):
+def get_topics(news_api, llm):
+    # get a list of the top 10 headlines from the news api
+    headlines = []
+    top_headlines = news_api.get_top_headlines(language='en', country='us', page_size=10)
+    # use llm to get a list of 5 topics from the headline list
+    template = """"
+    The top headlines are:
+    
+    {headlines}
+    
+    Generate a list of 5 topics that are related to these headlines. 
+    The list should be separated by new lines, and not numbered.
+    
+    Topics:
+    """
+    prompt = PromptTemplate(input_variables=['headlines'],
+                            template=template)
+    for headline in top_headlines["articles"]:
+        headlines.append(headline["title"])
+    topic_list = llm(prompt.format(headlines=headlines)).splitlines()
+    for topic in topic_list:
+        vprint(f"Topic: {topic}")
+    return topic_list
+
+
+def get_news(news_api, topic_list):
     news = {}
-    for topic in TOPIC_LIST:
+    for topic in topic_list:
         vprint(f"Getting news on {topic}")
-        news[topic] = news_api.get_everything(q=topic,
-                                              from_param=datetime.datetime.now() - datetime.timedelta(days=1),
-                                              to=datetime.datetime.now(),
-                                              language='en',
-                                              sort_by='relevancy',
-                                              page_size=1)
+        response = news_api.get_everything(q=topic,
+                                           from_param=datetime.datetime.now() - datetime.timedelta(days=1),
+                                           to=datetime.datetime.now(),
+                                           language='en',
+                                           sort_by='relevancy',
+                                           page_size=1)
+        news[topic] = {"url": response["articles"][0]["url"],
+                       "title": response["articles"][0]["title"],
+                       "content": response["articles"][0]["content"],
+                       "source": response["articles"][0]["source"]["name"]}
+        for item in news[topic]:
+            vprint(f"{item}: {news[topic][item]}")
     return news
 
 
-def get_news_article_urls(news):
-    urls = []
-    for topic in news:
-        for article in news[topic]['articles']:
-            urls.append(article['url'])
-    return urls
+def get_full_article_text(article_url, content):
+    content = content[:100]
+    response = requests.get(article_url)
+    soup = BeautifulSoup(response.text, 'html.parser')
+    article_text = soup.get_text()
+    start_index = article_text.find(content)
+    article_text = article_text[start_index:]
+    end_index = article_text.find("\n\n")
 
+    article_text = article_text[:end_index]
 
-def get_article_text(url):
-    article_text = requests.get(url).text
+    vprint(f"Article text: \n {article_text}")
     return article_text
 
 
-def clean_article_text(article_text):
-    # remove html tags, then return only the article text without all the extra stuff
-    soup = BeautifulSoup(article_text, 'html.parser')
-    text = soup.find_all('p')
-    article_text = ''
-    for paragraph in text:
-        article_text += paragraph.text
-    vprint(article_text)
-    return article_text
+def summarize_article_text(article_text, llm):
+    # split article into list of chunks that are each 1024 words long or less
+    article_text = article_text.split()
+    article_text_chunks = []
+    while len(article_text) > 1024:
+        article_text_chunks.append(" ".join(article_text[:1024]))
+        article_text = article_text[1024:]
+    article_text_chunks.append(" ".join(article_text))
+    summary = ""
+    for chunk in article_text_chunks:
+        template = """Summarize this text. be sure to include all of the relevant information
+    
+        {text}
+    
+        Summary:"""
+        prompt = PromptTemplate(input_variables=["text"],
+                                template=template)
+        summary = llm(prompt=prompt.format(text=chunk))
+    vprint(f"Summarized article text: \n {summary}")
+    return summary
+
+
+def get_podcast_intro(text, llm):
+    template = """
+    Generate an introduction script for a podcast given the following script. 
+    Make the text interesting and engaging in a conversational tone:
+
+    {text}
+
+    Introduction:"""
+    prompt = PromptTemplate(input_variables=["text"],
+                            template=template)
+    try:
+        output = llm(prompt=prompt.format(text=text))
+    except Exception as e:
+        vprint(e)
+        output = llm(prompt=prompt.format(text=summarize_article_text(text)))
+    vprint(f"Podcast intro: \n {output}")
+    return output
+
+
+def get_podcast_news(articles_dict, llm):
+    output = ""
+    for title in articles_dict:
+        template = """
+        Generate a news segment for a podcast given the following news article, This will not include an introduction
+        or conclusion, but only the news segment for this article which may be one of many
+
+        {title}
+
+        {content}
+
+        Podcast segment:
+        """
+        prompt = PromptTemplate(input_variables=["title", "content"],
+                                template=template)
+        try:
+            output += llm(prompt=prompt.format(title=title,
+                                               content=articles_dict[title]))
+        except Exception as e:
+            vprint(e)
+            output += llm(prompt=prompt.format(title=title,
+                                               content=summarize_article_text(articles_dict[title])))
+    vprint(f"Podcast news: \n {output}")
+    return output
+
+
+def generate_interview_questions(podcast_news, llm):
+    template = """   
+    Generate a list of interview questions for a podcast given the following news segment:
+    
+    {podcast_news}
+    
+    Interview questions:
+    """
+    prompt = PromptTemplate(input_variables=["podcast_news"],
+                            template=template)
+    questions = llm(prompt=prompt.format(podcast_news=podcast_news))
+    questions = questions.split("\n")
+    vprint(f"Interview questions: \n {questions}")
+    return questions
+
+
+def get_podcast_interview(questions, llm):
+    output = {}
+    for question in questions:
+        template = """
+        You are a guest on a podcast and are being interviewed.
+        The following is a question that is being asked of you:
+
+        {question}
+
+        Podcast Guest Response:
+        """
+        prompt = PromptTemplate(input_variables=["question"],
+                                template=template)
+        output[question] = llm(prompt=prompt.format(question=question))
+    vprint(f"Podcast interview: \n {output}")
+    return output
+
+
+def get_podcast_conclusion(text, llm):
+    template = """
+    Generate a conclusion script for a podcast given the following script. 
+    Make the text interesting and engaging in a conversational tone:
+
+    {text}
+
+    Conclusion:"""
+    prompt = PromptTemplate(input_variables=["text"],
+                            template=template)
+    try:
+        output = llm(prompt=prompt.format(text=text))
+    except Exception as e:
+        vprint(e)
+        output = llm(prompt=prompt.format(text=summarize_article_text(text)))
+    vprint(f"Podcast conclusion: \n {output}")
+    return output
+
+
+def get_podcast_script(intro, news, interview, conclusion):
+    script = intro + "\n\n"
+    script += news + "\n\n"
+    for question in interview:
+        script += question + "\n\n"
+        script += interview[question] + "\n\n"
+    script += conclusion
+    vprint(f"Podcast script: \n {script}")
+    return script
+
+
+def speak_full_podcast(intro, news, interview, conclusion, engine):
+    voices = engine.getProperty('voices')
+    engine.setProperty('voice', voices[0].id)
+    engine.say(intro)
+    engine.runAndWait()
+    engine.say(news)
+    engine.runAndWait()
+    for question in interview:
+        engine.setProperty('voice', voices[0].id)
+        engine.say(question)
+        engine.runAndWait()
+        engine.setProperty('voice', voices[10].id)
+        engine.say(interview[question])
+        engine.runAndWait()
+    engine.setProperty('voice', voices[0].id)
+    engine.say(conclusion)
+    engine.runAndWait()
+    engine.stop()
 
 
 def transform_func(inputs: dict) -> dict:
@@ -177,112 +351,26 @@ def transform_func(inputs: dict) -> dict:
     return {"output_text": shortened_text}
 
 
-def summarize_article_text(article_text, llm):
-    article_text = article_text[:4096]
-    if check_article_text(article_text, llm):
-        transform_chain = TransformChain(input_variables=["text"],
-                                         output_variables=["output_text"],
-                                         transform=transform_func)
-        template = """Summarize this text. be sure to include all of the relevant information
-    
-        {output_text}
-    
-        Summary:"""
-        prompt = PromptTemplate(input_variables=["output_text"],
-                                template=template)
-        llm_chain = LLMChain(llm=llm,
-                             prompt=prompt)
-        sequential_chain = SimpleSequentialChain(chains=[transform_chain, llm_chain])
-        output = sequential_chain.run(article_text)
-        vprint(f"Summarized article text: \n {output}")
-        return output
-    else:
-        vprint("Article text is not a news article")
-        return None
-
-
-def get_podcast_intro(text, llm):
-    transform_chain = TransformChain(input_variables=["text"],
-                                     output_variables=["output_text"],
-                                     transform=transform_func)
-    template = """
-    Generate an introduction script for an engaging podcast given the following script:
-
-    {output_text}
-
-    Introduction:"""
-    prompt = PromptTemplate(input_variables=["output_text"],
-                            template=template)
-    llm_chain = LLMChain(llm=llm,
-                         prompt=prompt)
-    sequential_chain = SimpleSequentialChain(chains=[transform_chain, llm_chain])
-    output = sequential_chain.run(text)
-    vprint(f"Podcast intro: \n {output}")
-    return output
-
-
-def check_article_text(article_text, llm):
-    template = """
-    Check the following text. does it seem like it is a news article?
-    
-    {text}
-    
-    Is this a news article answer with only 'Yes' or 'No'?
-    Answer:
-    """
-    prompt = PromptTemplate(input_variables=["text"],
-                            template=template)
-    output = llm(prompt.format(text=article_text))
-    vprint(f"Article text check: {article_text} \n {output}")
-    if "yes" in output.lower():
-        return True
-    else:
-        return False
-
-
-def get_podcast_script(summarized_article_text_list, llm):
-    transform_chain = TransformChain(input_variables=["text"],
-                                     output_variables=["output_text"],
-                                     transform=transform_func)
-    template = """
-    Generate a long, detailed, verbose script of this article for a segment of a podcast:
-
-    {text}
-
-    Podcast segment:
-    """
-    prompt = PromptTemplate(input_variables=["text"],
-                            template=template)
-    llm_chain = LLMChain(llm=llm,
-                         prompt=prompt)
-    sequential_chain = SimpleSequentialChain(chains=[transform_chain, llm_chain])
-    output_list = []
-    for item in summarized_article_text_list:
-        vprint(item)
-        output_list.append(sequential_chain.run(item))
-        vprint(output_list[-1])
-    return output_list
-
-
 def main():
-    llm, engine, google_search, agent, news_api, tools = init()
-    news = get_news(news_api=news_api)
-    url_list = get_news_article_urls(news=news)
-    raw_article_text_list = []
-    for url in url_list:
-        raw_article_text_list.append(get_article_text(url=url))
-    clean_article_text_list = []
-    for item in raw_article_text_list:
-        clean_article_text_list.append(clean_article_text(item))
-    summarized_article_text_list = []
-    for item in clean_article_text_list:
-        summarized_article_text_list.append(summarize_article_text(item, llm))
-    podcast_segment_list = get_podcast_script(summarized_article_text_list, llm)
-    podcast_script = ''
-    podcast_script.join(podcast_segment_list)
-    podcast_intro = get_podcast_intro(podcast_script, llm)
-    vprint('\n----------------Full Podcast script-------------\n', podcast_script, '\n')
-    speak(podcast_intro + podcast_script, engine)
+    llm, engine, google_search, news_api, tools = init()
+    topic_list = get_topics(news_api=news_api, llm=llm)
+    news = get_news(news_api=news_api, topic_list=topic_list)
+    articles_dict = {}
+    for item in news:
+        article_text = get_full_article_text(news[item]["url"], news[item]["content"])
+        articles_dict[news[item]["title"]] = article_text
+    podcast_news = get_podcast_news(articles_dict, llm)
+    interview_questions = generate_interview_questions(podcast_news, llm)
+    interview = get_podcast_interview(interview_questions, llm)
+    full_text = podcast_news
+    for question in interview:
+        full_text += f"\n\n{question}\n\n{interview[question]}"
+    conclusion = get_podcast_conclusion(full_text, llm)
+    full_text += f"\n\n{conclusion}"
+    podcast_intro = get_podcast_intro(full_text, llm)
+    podcast_script = get_podcast_script(podcast_intro, podcast_news, interview, conclusion)
+    print(podcast_script)
+    speak_full_podcast(podcast_intro, podcast_news, interview, conclusion, engine)
 
 
 if __name__ == '__main__':
